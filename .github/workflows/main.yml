@@ -1,0 +1,231 @@
+name: programmingwithkumaresan
+
+on:
+  workflow_dispatch:
+    inputs:
+      storage_needed:
+        description: 'Storage amount in GB (max 90GB usable)'
+        required: true
+        default: '100'
+        type: string
+
+jobs:
+  setup:
+    runs-on: windows-latest
+    timeout-minutes: 360  # Max 6 hours
+    env:
+      TARGET_GB: ${{ github.event.inputs.storage_needed }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Check available space
+      run: |
+        $drive = Get-PSDrive C
+        $freeGB = [math]::Round($drive.Free / 1GB, 2)
+        $usedGB = [math]::Round($drive.Used / 1GB, 2)
+        Write-Host "Available: $freeGB GB"
+        Write-Host "Used: $usedGB GB"
+        
+        # GitHub runners typically have ~85-90GB free
+        $maxUsable = 90
+        $targetGB = [int]${{ github.event.inputs.storage_needed }}
+        
+        if ($targetGB -gt $maxUsable) {
+          Write-Host "Warning: Reducing to $maxUsable GB (GitHub limit)"
+          $targetGB = $maxUsable
+        }
+        
+        echo "TARGET_GB=$targetGB" >> $env:GITHUB_ENV
+
+    - name: Create 100GB worth of data files
+      timeout-minutes: 350  # Leave 10 minutes for cleanup
+      run: |
+        # Create multiple large files to approximate 100GB
+        # Using sparse files to maximize usage
+        
+        # Method 1: Create large files with PowerShell
+        Write-Host "Creating 10x10GB files..."
+        
+        # Create 10 files of 10GB each (sparse)
+        for ($i=1; $i -le 10; $i++) {
+          $fileName = "large_file_$i.dat"
+          $sizeGB = 10
+          $sizeBytes = $sizeGB * 1GB
+          
+          Write-Host "Creating $fileName ($sizeGB GB)..."
+          
+          # Using fsutil to create sparse file quickly
+          fsutil file createnew $fileName $sizeBytes
+          
+          # Verify file size
+          $file = Get-Item $fileName
+          $fileGB = [math]::Round($file.Length / 1GB, 2)
+          Write-Host "Created: $fileName - $fileGB GB"
+          
+          # Optional: Fill with data (takes longer)
+          # if ($i -le 2) {
+          #   Write-Host "Filling file $i with data..."
+          #   $stream = [System.IO.File]::OpenWrite($fileName)
+          #   $buffer = [byte[]]::new(1MB)
+          #   $rng = New-Object System.Random
+          #   for ($j=0; $j -lt 1000; $j++) {
+          #     $rng.NextBytes($buffer)
+          #     $stream.Write($buffer, 0, $buffer.Length)
+          #   }
+          #   $stream.Close()
+          # }
+        }
+        
+        # Check total size created
+        $totalSize = (Get-ChildItem *.dat | Measure-Object Length -Sum).Sum
+        $totalGB = [math]::Round($totalSize / 1GB, 2)
+        Write-Host "Total created: $totalGB GB"
+        
+        # Create disk usage report
+        Get-PSDrive C | Format-List | Out-File "disk_report.txt"
+        Get-ChildItem | Sort-Object Length -Descending | Select-Object Name, @{Name="SizeGB";Expression={[math]::Round($_.Length/1GB, 2)}} | Format-Table | Out-File "files_report.txt"
+
+    - name: Process the large files
+      run: |
+        # Simulate processing 100GB of data
+        Write-Host "Processing large files..."
+        
+        # Example: Compress files
+        $files = Get-ChildItem *.dat
+        $count = $files.Count
+        
+        foreach ($file in $files) {
+          $sizeGB = [math]::Round($file.Length / 1GB, 2)
+          Write-Host "Processing: $($file.Name) - $sizeGB GB"
+          
+          # Simulate work (5 minutes per file)
+          Start-Sleep -Seconds 30
+          
+          # Create a compressed version
+          # Compress-Archive -Path $file.Name -DestinationPath "$($file.Name).zip"
+          
+          Write-Host "✓ Processed: $($file.Name)"
+        }
+
+    - name: Monitor disk space during execution
+      run: |
+        # Create a monitoring script
+        $monitorScript = @"
+        param(\$durationMinutes)
+        \$endTime = (Get-Date).AddMinutes(\$durationMinutes)
+        
+        while ((Get-Date) -lt \$endTime) {
+            \$drive = Get-PSDrive C
+            \$freeGB = [math]::Round(\$drive.Free / 1GB, 2)
+            \$usedGB = [math]::Round(\$drive.Used / 1GB, 2)
+            Write-Host "[Disk Monitor] Free: \$freeGB GB | Used: \$usedGB GB | Time: \$(Get-Date -Format 'HH:mm:ss')"
+            Start-Sleep -Seconds 30
+        }
+        "@
+        
+        $monitorScript | Out-File "monitor.ps1"
+        
+        # Run monitoring in background
+        Start-Job -ScriptBlock {
+            param($duration)
+            & ".\monitor.ps1" -durationMinutes $duration
+        } -ArgumentList 340
+
+    - name: Generate massive dataset (alternative approach)
+      if: always()
+      run: |
+        # Create large text/log files
+        Write-Host "Generating large datasets..."
+        
+        # Create 50 files of 2GB each
+        for ($i=1; $i -le 50; $i++) {
+          $filename = "dataset_$i.txt"
+          Write-Host "Creating $filename..."
+          
+          # Generate 2GB of repeating data
+          $chunk = "Sample data line for file $i - " + ("x" * 1000) + "`n"
+          $linesPerGB = 1GB / $chunk.Length
+          $linesFor2GB = $linesPerGB * 2
+          
+          # Write in chunks to avoid memory issues
+          $stream = [System.IO.StreamWriter]::new($filename)
+          for ($j=0; $j -lt 100000; $j++) {  # Reduced for speed
+            $stream.Write($chunk)
+          }
+          $stream.Close()
+          
+          # Report progress
+          if ($i % 10 -eq 0) {
+            $totalSize = (Get-ChildItem dataset_*.txt | Measure-Object Length -Sum).Sum
+            $totalGB = [math]::Round($totalSize / 1GB, 2)
+            Write-Host "Progress: Created $i files, Total: $totalGB GB"
+          }
+        }
+
+    - name: Create and work with virtual disk
+      run: |
+        # Create virtual disk (VHD) to maximize storage usage
+        Write-Host "Creating virtual disk..."
+        
+        $vhdxSize = 50GB  # Create 50GB VHDX
+        $vhdPath = "temp_disk.vhdx"
+        
+        # Create VHDX file
+        New-VHD -Path $vhdPath -SizeBytes $vhdxSize -Dynamic
+        
+        # Initialize and format (commented - requires admin)
+        # Initialize-Disk -VirtualDiskPath $vhdPath
+        # New-Partition -DiskNumber X -UseMaximumSize | Format-Volume -FileSystem NTFS -NewFileSystemLabel "TempStorage"
+        
+        Write-Host "VHDX created: $vhdPath - $([math]::Round($vhdxSize/1GB, 2)) GB"
+
+    - name: Clean up before time runs out
+      if: always()
+      run: |
+        Write-Host "Cleaning up temporary files..."
+        
+        # Delete large files to free space
+        $largeFiles = Get-ChildItem *.dat, *.txt, *.vhdx -ErrorAction SilentlyContinue
+        
+        foreach ($file in $largeFiles) {
+          $sizeGB = [math]::Round($file.Length / 1GB, 2)
+          Write-Host "Removing: $($file.Name) - $sizeGB GB"
+          Remove-Item $file.FullName -Force
+        }
+        
+        # Final disk space report
+        $drive = Get-PSDrive C
+        $freeGB = [math]::Round($drive.Free / 1GB, 2)
+        $usedGB = [math]::Round($drive.Used / 1GB, 2)
+        
+        Write-Host "=== FINAL REPORT ==="
+        Write-Host "Free space: $freeGB GB"
+        Write-Host "Used space: $usedGB GB"
+        Write-Host "Total processed: ~100 GB simulated"
+        
+        # Save final report
+        @"
+        GitHub Actions Storage Test Report
+        =================================
+        Test Date: $(Get-Date)
+        Target Storage: ${{ github.event.inputs.storage_needed }} GB
+        Maximum Usable: $env:TARGET_GB GB
+        Final Free Space: $freeGB GB
+        Final Used Space: $usedGB GB
+        
+        Note: GitHub Actions runners have limited storage.
+        For true 100GB+ storage, use self-hosted runners.
+        "@ | Out-File "final_report.txt"
+
+    - name: Upload artifacts (if any files remain)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: storage-test-results
+        path: |
+          final_report.txt
+          disk_report.txt
+          files_report.txt
+        retention-days: 1
