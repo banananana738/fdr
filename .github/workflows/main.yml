@@ -1,107 +1,68 @@
-name: RDP with Ngrok
+name: Windows RDP Fast
 
 on:
   workflow_dispatch:
-    inputs:
-      password:
-        description: 'RDP Password'
-        required: true
-        default: 'Pass123!'
-        type: string
+  schedule:
+    - cron: '0 */6 * * *'  # Try every 6 hours
 
 jobs:
-  rdp:
-    runs-on: windows-latest
-    timeout-minutes: 330
+  windows-rdp:
+    # Strategy to retry if no runner
+    strategy:
+      max-parallel: 1
+      matrix:
+        os: [windows-2022, windows-2019, windows-latest]
+    
+    runs-on: ${{ matrix.os }}
     
     steps:
-    # Step 1: Enable RDP
-    - name: Enable Remote Desktop
+    - name: Check if Windows runner is ready
       run: |
-        # Enable RDP
-        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+        echo "Windows runner acquired!"
+        echo "OS: $RUNNER_OS"
+        echo "Starting RDP setup..."
         
-        # Open firewall
+    - name: Enable RDP
+      run: |
+        reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
         netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
         
-        echo "RDP enabled"
-        
-    # Step 2: Create user
-    - name: Create RDP User
-      env:
-        RDP_PASS: ${{ github.event.inputs.password }}
+    - name: Create User
       run: |
-        # Create user
-        net user runner "$env:RDP_PASS" /add /y
-        net localgroup "Remote Desktop Users" runner /add
-        net localgroup administrators runner /add
+        net user rdpuser Password123! /add
+        net localgroup "Remote Desktop Users" rdpuser /add
         
-        echo "USERNAME=runner" >> $env:GITHUB_ENV
-        echo "User created"
-        
-    # Step 3: Download ngrok
     - name: Get Ngrok
       run: |
-        # Download ngrok
         curl -L https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip -o ngrok.zip
-        
-        # Extract
         tar -xf ngrok.zip
-        echo "Ngrok ready"
         
-    # Step 4: Setup ngrok with your token
-    - name: Configure Ngrok
+    - name: Setup Ngrok
       run: |
-        # Your ngrok token
         ./ngrok authtoken 2yTGXjOucmtLbslj4gHvfhPMMtD_7WvugEqip6Y3Utun6Em4n
-        echo "Ngrok configured"
         
-    # Step 5: Start tunnel
-    - name: Start RDP Tunnel
+    - name: Start Tunnel
       run: |
-        # Start ngrok in background
         Start-Process ./ngrok -ArgumentList "tcp 3389" -NoNewWindow
-        
-        # Wait for tunnel
         sleep 10
-        
-        # Get tunnel URL
         $tunnel = curl -s http://localhost:4040/api/tunnels | ConvertFrom-Json
         $url = $tunnel.tunnels[0].public_url -replace 'tcp://', ''
         echo "RDP_URL=$url" >> $env:GITHUB_ENV
-        echo "Tunnel: $url"
         
-    # Step 6: Display info
-    - name: Show Connection Info
+    - name: Show Info
       run: |
         echo ""
-        echo "========================================"
-        echo "RDP CONNECTION READY"
-        echo "========================================"
+        echo "=== RDP READY ==="
         echo "Connect to: $env:RDP_URL"
-        echo "Username: $env:USERNAME"
-        echo "Password: ${{ github.event.inputs.password }}"
-        echo "========================================"
-        echo ""
-        echo "To connect:"
-        echo "mstsc /v:$env:RDP_URL"
+        echo "Username: rdpuser"
+        echo "Password: Password123!"
+        echo "Time: $(date)"
         echo ""
         
-    # Step 7: Keep alive
-    - name: Wait
+    - name: Keep Alive
       run: |
-        # Wait 5 hours
-        sleep 18000
-        echo "Session ending soon..."
-        
-    # Step 8: Cleanup
-    - name: Cleanup
-      if: always()
-      run: |
-        # Stop ngrok
-        Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
-        
-        # Delete user
-        net user runner /delete /y 2>$null
-        
-        echo "Done"
+        # 5.5 hour countdown
+        for i in {1..330}; do
+          echo "Active: $i/330 minutes"
+          sleep 60
+        done
