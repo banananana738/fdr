@@ -1,0 +1,212 @@
+name: programmingwithkumaresan-anydesk
+
+on:
+  workflow_dispatch:
+    inputs:
+      enable_anydesk:
+        description: 'Enable AnyDesk remote access'
+        required: true
+        default: 'true'
+        type: boolean
+      anydesk_password:
+        description: 'AnyDesk password (optional)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  remote-access:
+    runs-on: windows-latest
+    timeout-minutes: 355  # Just under 6 hours
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Download and Install AnyDesk
+        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+        run: |
+          # Download AnyDesk (direct download link)
+          Write-Host "Downloading AnyDesk..."
+          $downloadUrl = "https://download.anydesk.com/AnyDesk.exe"
+          $anydeskPath = "AnyDesk.exe"
+          
+          # Download AnyDesk
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $anydeskPath
+          
+          # Install AnyDesk silently
+          Write-Host "Installing AnyDesk..."
+          Start-Process -FilePath $anydeskPath -ArgumentList "--install", "--silent", "--start-with-win" -Wait
+          
+          # Wait for installation
+          Start-Sleep -Seconds 10
+          
+          Write-Host "AnyDesk installed successfully!"
+          
+      - name: Configure AnyDesk
+        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+        env:
+          AD_PASSWORD: ${{ secrets.ANYDESK_PASSWORD || github.event.inputs.anydesk_password }}
+        run: |
+          # First, start AnyDesk to generate ID
+          Write-Host "Starting AnyDesk service..."
+          Start-Service "AnyDesk"
+          Start-Sleep -Seconds 5
+          
+          # Get AnyDesk ID
+          Write-Host "Getting AnyDesk ID..."
+          
+          # Method 1: Check AnyDesk config file
+          $anydeskConfig = "$env:ProgramData\AnyDesk\system.conf"
+          if (Test-Path $anydeskConfig) {
+              $id = Select-String -Path $anydeskConfig -Pattern "ad\.anynet\.id=" | ForEach-Object { $_.Line.Split('=')[1] }
+              if ($id) {
+                  Write-Host "Found AnyDesk ID from config: $id"
+                  echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
+              }
+          }
+          
+          # Method 2: Use AnyDesk CLI
+          # Try to get ID via command line
+          $anydeskExe = "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
+          if (Test-Path $anydeskExe) {
+              # Start AnyDesk in tray mode
+              Start-Process $anydeskExe -ArgumentList "--service"
+              Start-Sleep -Seconds 5
+              
+              # Get ID using AnyDesk CLI
+              $output = & $anydeskExe --get-id 2>&1
+              if ($output -match "^[0-9]{9}$") {
+                  $id = $output.Trim()
+                  Write-Host "AnyDesk CLI returned ID: $id"
+                  echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
+              }
+          }
+          
+          # Set password if provided
+          if (-not [string]::IsNullOrEmpty($env:AD_PASSWORD)) {
+              Write-Host "Setting AnyDesk password..."
+              
+              # Create password config
+              $passwordConfig = @"
+              security.password_admin=`"$env:AD_PASSWORD`"
+              security.enforce_password_admin=true
+"@
+              
+              $passwordConfig | Out-File -FilePath "$env:TEMP\anydesk_pass.conf" -Encoding UTF8
+              
+              # Apply password config
+              & $anydeskExe --apply-settings "$env:TEMP\anydesk_pass.conf"
+              
+              Write-Host "Password set successfully!"
+          }
+          
+          # Allow incoming connections
+          & $anydeskExe --set-options "security.incoming_lan=true"
+          & $anydeskExe --set-options "security.incoming_tcp_tunnel=true"
+          
+      - name: Display Connection Information
+        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+        run: |
+          Write-Host ""
+          Write-Host "================================================"
+          Write-Host "🎮 ANYDESK REMOTE ACCESS READY"
+          Write-Host "================================================"
+          
+          if (-not [string]::IsNullOrEmpty($env:ANYDESK_ID)) {
+              Write-Host "📟 AnyDesk ID: $env:ANYDESK_ID"
+          } else {
+              Write-Host "⚠️  Could not retrieve AnyDesk ID automatically"
+              Write-Host "💡 Manually check: Open AnyDesk GUI on the runner"
+          }
+          
+          if (-not [string]::IsNullOrEmpty($env:AD_PASSWORD)) {
+              Write-Host "🔐 Password: ******* (set via secret/input)"
+          } else {
+              Write-Host "⚠️  No password set - connection will prompt"
+          }
+          
+          Write-Host "⏱️  Session Duration: 6 hours maximum"
+          Write-Host "🖥️  OS: Windows Server 2022"
+          Write-Host "================================================"
+          Write-Host ""
+          
+          # Display QR code URL (AnyDesk format)
+          if (-not [string]::IsNullOrEmpty($env:ANYDESK_ID)) {
+              $qrUrl = "https://go.anydesk.com/client.html?ad=$env:ANYDESK_ID"
+              Write-Host "📱 Quick Connect URL: $qrUrl"
+              
+              # Alternative QR code
+              $qrCodeUrl = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$qrUrl"
+              Write-Host "📷 QR Code: $qrCodeUrl"
+          }
+          
+      - name: Keep AnyDesk Service Running
+        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+        run: |
+          # Monitor and keep AnyDesk running
+          $startTime = Get-Date
+          $endTime = $startTime.AddMinutes(350)  # 5h 50m
+          
+          Write-Host "AnyDesk service will run until: $($endTime.ToString('HH:mm:ss'))"
+          Write-Host "Current ID: $env:ANYDESK_ID"
+          
+          # Keep process alive
+          while ((Get-Date) -lt $endTime) {
+              $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] AnyDesk active - $remaining minutes remaining"
+              
+              # Restart service if it stopped
+              $service = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
+              if ($service.Status -ne "Running") {
+                  Write-Host "Restarting AnyDesk service..."
+                  Start-Service -Name "AnyDesk"
+              }
+              
+              Start-Sleep -Seconds 30
+          }
+          
+      - name: Run Custom Scripts (Your Downloads.bat)
+        run: |
+          Write-Host "Running your custom scripts..."
+          
+          # Run your Downloads.bat if it exists
+          if (Test-Path "Downloads.bat") {
+              Write-Host "Executing Downloads.bat..."
+              cmd /c Downloads.bat
+          } else {
+              Write-Host "Downloads.bat not found, skipping..."
+          }
+          
+          # Install additional tools if you want
+          Write-Host "Installing common tools..."
+          
+          # Install Chocolatey if not present
+          if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
+              Set-ExecutionPolicy Bypass -Scope Process -Force
+              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+              iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+          
+          # Example: Install some tools
+          # choco install -y git python nodejs vscode
+          
+      - name: Cleanup AnyDesk
+        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+        run: |
+          Write-Host "Cleaning up AnyDesk..."
+          
+          # Stop AnyDesk service
+          Stop-Service -Name "AnyDesk" -Force -ErrorAction SilentlyContinue
+          
+          # Uninstall AnyDesk
+          $uninstallPath = "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
+          if (Test-Path $uninstallPath) {
+              Start-Process -FilePath $uninstallPath -ArgumentList "--remove", "--silent" -Wait
+          }
+          
+          # Clean up residual files
+          Remove-Item -Path "$env:TEMP\anydesk*" -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "AnyDesk.exe" -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "Cleanup completed!"
