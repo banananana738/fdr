@@ -1,212 +1,228 @@
-name: programmingwithkumaresan-anydesk
+name: programmingwithkumaresan-rdp
 
 on:
   workflow_dispatch:
     inputs:
-      enable_anydesk:
-        description: 'Enable AnyDesk remote access'
+      enable_rdp:
+        description: 'Enable RDP via Ngrok'
         required: true
         default: 'true'
         type: boolean
-      anydesk_password:
-        description: 'AnyDesk password (optional)'
+      rdp_password:
+        description: 'Windows password (min 6 chars)'
         required: false
-        default: ''
+        default: 'GitHubRDP123'
         type: string
 
 jobs:
-  remote-access:
+  windows-rdp:
     runs-on: windows-latest
-    timeout-minutes: 355  # Just under 6 hours
+    timeout-minutes: 355
     
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
-        
-      - name: Download and Install AnyDesk
-        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+      
+      - name: Configure Windows RDP
+        if: ${{ github.event.inputs.enable_rdp == 'true' }}
+        env:
+          WIN_PASSWORD: ${{ secrets.RDP_PASSWORD || github.event.inputs.rdp_password }}
         run: |
-          # Download AnyDesk (direct download link)
-          Write-Host "Downloading AnyDesk..."
-          $downloadUrl = "https://download.anydesk.com/AnyDesk.exe"
-          $anydeskPath = "AnyDesk.exe"
+          Write-Host "Setting up Windows Remote Desktop..."
           
-          # Download AnyDesk
-          Invoke-WebRequest -Uri $downloadUrl -OutFile $anydeskPath
+          # Enable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop'
           
-          # Install AnyDesk silently
-          Write-Host "Installing AnyDesk..."
-          Start-Process -FilePath $anydeskPath -ArgumentList "--install", "--silent", "--start-with-win" -Wait
+          # Create/Reset local user for RDP
+          $username = "github-runner"
+          $password = ConvertTo-SecureString $env:WIN_PASSWORD -AsPlainText -Force
           
-          # Wait for installation
+          # Check if user exists
+          try {
+              $user = Get-LocalUser -Name $username -ErrorAction Stop
+              Write-Host "User exists, updating password..."
+              Set-LocalUser -Name $username -Password $password
+          } catch {
+              Write-Host "Creating new user..."
+              New-LocalUser -Name $username -Password $password -FullName "GitHub Runner" -Description "Temporary RDP user"
+          }
+          
+          # Add to Remote Desktop Users group
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+          
+          # Add to Administrators group (if needed)
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          
+          # Disable Network Level Authentication for easier connection
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name 'UserAuthentication' -Value 0
+          
+          # Restart RDP service
+          Restart-Service -Name TermService -Force
+          
+          Write-Host "Windows RDP configured successfully!"
+          Write-Host "Username: $username"
+          Write-Host "Password: *******"
+          
+      - name: Install and Configure Ngrok
+        if: ${{ github.event.inputs.enable_rdp == 'true' }}
+        env:
+          NGROK_AUTH_TOKEN: ${{ secrets.NGROK_AUTH_TOKEN }}
+        run: |
+          Write-Host "Setting up Ngrok tunnel for RDP..."
+          
+          # Download ngrok
+          $ngrokUrl = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+          Invoke-WebRequest -Uri $ngrokUrl -OutFile "ngrok.zip"
+          Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
+          
+          # Check if auth token is provided
+          if ([string]::IsNullOrEmpty($env:NGROK_AUTH_TOKEN)) {
+              Write-Host "WARNING: No Ngrok auth token provided!"
+              Write-Host "You need to sign up at ngrok.com and get a free token"
+              Write-Host "Then add it as GitHub secret: NGROK_AUTH_TOKEN"
+              exit 1
+          }
+          
+          # Configure ngrok with auth token
+          .\ngrok.exe config add-authtoken $env:NGROK_AUTH_TOKEN
+          
+          # Create ngrok config file for RDP
+          $ngrokConfig = @"
+version: "2"
+authtoken: $env:NGROK_AUTH_TOKEN
+tunnels:
+  rdp:
+    proto: tcp
+    addr: 3389
+    bind_tls: false
+"@
+          
+          $ngrokConfig | Out-File -FilePath "ngrok.yml" -Encoding UTF8
+          
+          # Start ngrok tunnel for RDP
+          Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
+          
+          # Wait for tunnel to establish
           Start-Sleep -Seconds 10
           
-          Write-Host "AnyDesk installed successfully!"
+          # Get tunnel URL
+          $tunnelInfo = .\ngrok.exe tunnel list --format json | ConvertFrom-Json
           
-      - name: Configure AnyDesk
-        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
-        env:
-          AD_PASSWORD: ${{ secrets.ANYDESK_PASSWORD || github.event.inputs.anydesk_password }}
-        run: |
-          # First, start AnyDesk to generate ID
-          Write-Host "Starting AnyDesk service..."
-          Start-Service "AnyDesk"
+          if ($tunnelInfo) {
+              $rdpTunnel = $tunnelInfo | Where-Object { $_.name -eq "rdp" -or $_.proto -eq "tcp" }
+              if ($rdpTunnel) {
+                  $rdpUrl = $rdpTunnel.public_url
+                  echo "RDP_URL=$rdpUrl" >> $env:GITHUB_ENV
+                  Write-Host "✅ RDP Tunnel URL: $rdpUrl"
+              }
+          }
+          
+          # Alternative: Get from ngrok API
           Start-Sleep -Seconds 5
-          
-          # Get AnyDesk ID
-          Write-Host "Getting AnyDesk ID..."
-          
-          # Method 1: Check AnyDesk config file
-          $anydeskConfig = "$env:ProgramData\AnyDesk\system.conf"
-          if (Test-Path $anydeskConfig) {
-              $id = Select-String -Path $anydeskConfig -Pattern "ad\.anynet\.id=" | ForEach-Object { $_.Line.Split('=')[1] }
-              if ($id) {
-                  Write-Host "Found AnyDesk ID from config: $id"
-                  echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
+          $apiResponse = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -ErrorAction SilentlyContinue
+          if ($apiResponse) {
+              foreach ($tunnel in $apiResponse.tunnels) {
+                  if ($tunnel.proto -eq "tcp") {
+                      $rdpUrl = $tunnel.public_url
+                      echo "RDP_URL=$rdpUrl" >> $env:GITHUB_ENV
+                      Write-Host "🌐 RDP Public URL: $rdpUrl"
+                      break
+                  }
               }
           }
           
-          # Method 2: Use AnyDesk CLI
-          # Try to get ID via command line
-          $anydeskExe = "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
-          if (Test-Path $anydeskExe) {
-              # Start AnyDesk in tray mode
-              Start-Process $anydeskExe -ArgumentList "--service"
-              Start-Sleep -Seconds 5
-              
-              # Get ID using AnyDesk CLI
-              $output = & $anydeskExe --get-id 2>&1
-              if ($output -match "^[0-9]{9}$") {
-                  $id = $output.Trim()
-                  Write-Host "AnyDesk CLI returned ID: $id"
-                  echo "ANYDESK_ID=$id" >> $env:GITHUB_ENV
-              }
-          }
-          
-          # Set password if provided
-          if (-not [string]::IsNullOrEmpty($env:AD_PASSWORD)) {
-              Write-Host "Setting AnyDesk password..."
-              
-              # Create password config
-              $passwordConfig = @"
-              security.password_admin=`"$env:AD_PASSWORD`"
-              security.enforce_password_admin=true
-"@
-              
-              $passwordConfig | Out-File -FilePath "$env:TEMP\anydesk_pass.conf" -Encoding UTF8
-              
-              # Apply password config
-              & $anydeskExe --apply-settings "$env:TEMP\anydesk_pass.conf"
-              
-              Write-Host "Password set successfully!"
-          }
-          
-          # Allow incoming connections
-          & $anydeskExe --set-options "security.incoming_lan=true"
-          & $anydeskExe --set-options "security.incoming_tcp_tunnel=true"
-          
-      - name: Display Connection Information
-        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+      - name: Display RDP Connection Information
+        if: ${{ github.event.inputs.enable_rdp == 'true' }}
         run: |
           Write-Host ""
-          Write-Host "================================================"
-          Write-Host "🎮 ANYDESK REMOTE ACCESS READY"
-          Write-Host "================================================"
+          Write-Host "=================================================="
+          Write-Host "🖥️  WINDOWS RDP REMOTE DESKTOP READY"
+          Write-Host "=================================================="
+          Write-Host "👤 Username: github-runner"
           
-          if (-not [string]::IsNullOrEmpty($env:ANYDESK_ID)) {
-              Write-Host "📟 AnyDesk ID: $env:ANYDESK_ID"
+          if ($env:WIN_PASSWORD) {
+              Write-Host "🔐 Password: $env:WIN_PASSWORD"
           } else {
-              Write-Host "⚠️  Could not retrieve AnyDesk ID automatically"
-              Write-Host "💡 Manually check: Open AnyDesk GUI on the runner"
+              Write-Host "🔐 Password: (see input or secret)"
           }
           
-          if (-not [string]::IsNullOrEmpty($env:AD_PASSWORD)) {
-              Write-Host "🔐 Password: ******* (set via secret/input)"
+          if (-not [string]::IsNullOrEmpty($env:RDP_URL)) {
+              # Parse ngrok URL (format: tcp://0.tcp.ngrok.io:12345)
+              $rdpUrl = $env:RDP_URL
+              $rdpUrl = $rdpUrl -replace 'tcp://', ''
+              $hostPort = $rdpUrl -split ':'
+              $rdpHost = $hostPort[0]
+              $rdpPort = $hostPort[1]
+              
+              Write-Host "🌐 Connection: $rdpHost:$rdpPort"
+              Write-Host ""
+              Write-Host "📝 How to connect:"
+              Write-Host "1. Open Remote Desktop Connection (mstsc)"
+              Write-Host "2. Computer: $rdpHost:$rdpPort"
+              Write-Host "3. Username: github-runner"
+              Write-Host "4. Password: (above)"
+              Write-Host ""
+              Write-Host "🔗 Quick connect string:"
+              Write-Host "mstsc /v:$rdpHost`:$rdpPort"
+              
+              # Generate RDP file
+              $rdpContent = @"
+full address:s:$rdpHost`:$rdpPort
+username:s:github-runner
+"@
+              $rdpContent | Out-File -FilePath "connection.rdp" -Encoding UTF8
+              Write-Host "💾 RDP file saved: connection.rdp"
           } else {
-              Write-Host "⚠️  No password set - connection will prompt"
+              Write-Host "⚠️  RDP URL not available yet"
+              Write-Host "💡 Check ngrok setup or wait a moment"
           }
           
           Write-Host "⏱️  Session Duration: 6 hours maximum"
-          Write-Host "🖥️  OS: Windows Server 2022"
-          Write-Host "================================================"
-          Write-Host ""
+          Write-Host "=================================================="
           
-          # Display QR code URL (AnyDesk format)
-          if (-not [string]::IsNullOrEmpty($env:ANYDESK_ID)) {
-              $qrUrl = "https://go.anydesk.com/client.html?ad=$env:ANYDESK_ID"
-              Write-Host "📱 Quick Connect URL: $qrUrl"
-              
-              # Alternative QR code
-              $qrCodeUrl = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=$qrUrl"
-              Write-Host "📷 QR Code: $qrCodeUrl"
-          }
-          
-      - name: Keep AnyDesk Service Running
-        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+      - name: Keep Session Alive
+        if: ${{ github.event.inputs.enable_rdp == 'true' }}
         run: |
-          # Monitor and keep AnyDesk running
-          $startTime = Get-Date
-          $endTime = $startTime.AddMinutes(350)  # 5h 50m
+          Write-Host "RDP session active..."
+          Write-Host "Ngrok tunnel: $env:RDP_URL"
+          Write-Host "Username: github-runner"
           
-          Write-Host "AnyDesk service will run until: $($endTime.ToString('HH:mm:ss'))"
-          Write-Host "Current ID: $env:ANYDESK_ID"
-          
-          # Keep process alive
+          # Display countdown
+          $endTime = (Get-Date).AddMinutes(350)
           while ((Get-Date) -lt $endTime) {
               $remaining = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 1)
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] AnyDesk active - $remaining minutes remaining"
-              
-              # Restart service if it stopped
-              $service = Get-Service -Name "AnyDesk" -ErrorAction SilentlyContinue
-              if ($service.Status -ne "Running") {
-                  Write-Host "Restarting AnyDesk service..."
-                  Start-Service -Name "AnyDesk"
-              }
-              
-              Start-Sleep -Seconds 30
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP active - $remaining minutes left"
+              Start-Sleep -Seconds 60
           }
           
-      - name: Run Custom Scripts (Your Downloads.bat)
-        run: |
-          Write-Host "Running your custom scripts..."
+          Write-Host "⚠️  Time limit reached! Session ending soon..."
           
-          # Run your Downloads.bat if it exists
+      - name: Run Your Custom Scripts
+        run: |
+          Write-Host "Running your scripts while RDP is available..."
+          
+          # Run your Downloads.bat
           if (Test-Path "Downloads.bat") {
               Write-Host "Executing Downloads.bat..."
               cmd /c Downloads.bat
-          } else {
-              Write-Host "Downloads.bat not found, skipping..."
           }
           
-          # Install additional tools if you want
-          Write-Host "Installing common tools..."
+          # Install tools if needed
+          # choco install -y git python vscode
           
-          # Install Chocolatey if not present
-          if (-not (Test-Path "$env:ProgramData\chocolatey\choco.exe")) {
-              Set-ExecutionPolicy Bypass -Scope Process -Force
-              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-              iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-          }
-          
-          # Example: Install some tools
-          # choco install -y git python nodejs vscode
-          
-      - name: Cleanup AnyDesk
-        if: ${{ github.event.inputs.enable_anydesk == 'true' }}
+      - name: Cleanup
+        if: always()
         run: |
-          Write-Host "Cleaning up AnyDesk..."
+          Write-Host "Cleaning up..."
           
-          # Stop AnyDesk service
-          Stop-Service -Name "AnyDesk" -Force -ErrorAction SilentlyContinue
+          # Kill ngrok
+          Get-Process ngrok -ErrorAction SilentlyContinue | Stop-Process -Force
           
-          # Uninstall AnyDesk
-          $uninstallPath = "$env:ProgramFiles\AnyDesk\AnyDesk.exe"
-          if (Test-Path $uninstallPath) {
-              Start-Process -FilePath $uninstallPath -ArgumentList "--remove", "--silent" -Wait
-          }
+          # Disable RDP
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 1
           
-          # Clean up residual files
-          Remove-Item -Path "$env:TEMP\anydesk*" -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path "AnyDesk.exe" -Force -ErrorAction SilentlyContinue
+          # Delete temp user
+          Remove-LocalUser -Name "github-runner" -ErrorAction SilentlyContinue
           
-          Write-Host "Cleanup completed!"
+          Write-Host "Cleanup complete!"
