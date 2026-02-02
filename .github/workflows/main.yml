@@ -1,0 +1,120 @@
+name: programmingwithkumaresan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Setup with RustDesk Remote Access
+    runs-on: windows-latest
+    timeout-minutes: 360  # 6 hours max
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Download and Install RustDesk
+        run: |
+          # Download RustDesk Windows portable version
+          Invoke-WebRequest -Uri "https://github.com/rustdesk/rustdesk/releases/download/1.2.3/rustdesk-1.2.3-windows_x64.zip" -OutFile "rustdesk.zip"
+          
+          # Extract RustDesk
+          Expand-Archive -Path "rustdesk.zip" -DestinationPath ".\rustdesk\" -Force
+          
+          Write-Host "RustDesk downloaded and extracted successfully!"
+          
+          # Navigate to RustDesk folder
+          Set-Location -Path ".\rustdesk\"
+          
+          # List files to verify
+          Get-ChildItem
+
+      - name: Setup RustDesk ID/Password
+        env:
+          RUSTDESK_PASSWORD: ${{ secrets.RUSTDESK_PASSWORD }}
+        run: |
+          Set-Location -Path ".\rustdesk\"
+          
+          # Configure RustDesk with your password
+          if (-not [string]::IsNullOrEmpty($env:RUSTDESK_PASSWORD)) {
+            # First, run RustDesk to generate ID
+            Start-Process -FilePath ".\rustdesk.exe" -ArgumentList "--get-id" -Wait
+            
+            # Get the generated ID
+            $rustdeskId = & .\rustdesk.exe --get-id
+            Write-Host "RustDesk ID: $rustdeskId"
+            echo "RUSTDESK_ID=$rustdeskId" >> $env:GITHUB_ENV
+            
+            # Set password (stored in GitHub Secrets)
+            & .\rustdesk.exe --password $env:RUSTDESK_PASSWORD
+            Write-Host "Password set successfully!"
+          } else {
+            Write-Host "Running without password (not recommended)"
+          }
+
+      - name: Start RustDesk Service
+        run: |
+          Set-Location -Path ".\rustdesk\"
+          
+          # Start RustDesk in background
+          $rustdeskProcess = Start-Process -FilePath ".\rustdesk.exe" -PassThru
+          
+          # Save process ID for later
+          echo "RUSTDESK_PID=$($rustdeskProcess.Id)" >> $env:GITHUB_ENV
+          
+          Write-Host "RustDesk started with PID: $($rustdeskProcess.Id)"
+          
+          # Wait a moment for service to initialize
+          Start-Sleep -Seconds 10
+          
+          # Display connection info
+          if (-not [string]::IsNullOrEmpty($env:RUSTDESK_ID)) {
+            Write-Host "========================================="
+            Write-Host "REMOTE ACCESS READY"
+            Write-Host "RustDesk ID: $env:RUSTDESK_ID"
+            Write-Host "Password: ******* (from GitHub Secrets)"
+            Write-Host "========================================="
+          }
+
+      - name: Install and Configure Additional Tools
+        run: |
+          # Install Chocolatey (Windows package manager)
+          Set-ExecutionPolicy Bypass -Scope Process -Force
+          [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+          iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          
+          # Install common development tools
+          choco install -y git python nodejs vscode curl wget
+          
+          # Display system info
+          systeminfo | Select-String "OS Name","OS Version","Total Physical Memory"
+
+      - name: Long-running Process with Remote Access
+        run: |
+          Write-Host "Your GitHub Actions runner is now accessible via RustDesk!"
+          Write-Host "ID: $env:RUSTDESK_ID"
+          Write-Host "Note: You have 6 hours before this session ends"
+          
+          # Simulate work while remote access is active
+          $counter = 0
+          while ($counter -lt 200) {  # Run for ~5.5 hours
+              $timeLeft = 360 - ($counter * 1.65)
+              Write-Host "[$((Get-Date).ToString('HH:mm:ss'))] Time remaining: ~$([math]::Round($timeLeft)) minutes | RustDesk ID: $env:RUSTDESK_ID"
+              Start-Sleep -Seconds 100
+              $counter++
+          }
+
+      - name: Cleanup and Stop RustDesk
+        if: always()
+        run: |
+          # Stop RustDesk process
+          if (-not [string]::IsNullOrEmpty($env:RUSTDESK_PID)) {
+              Write-Host "Stopping RustDesk (PID: $env:RUSTDESK_PID)..."
+              Stop-Process -Id $env:RUSTDESK_PID -Force -ErrorAction SilentlyContinue
+          }
+          
+          # Clean up files
+          Remove-Item -Path ".\rustdesk\" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path ".\rustdesk.zip" -Force -ErrorAction SilentlyContinue
+          
+          Write-Host "Cleanup completed!"
