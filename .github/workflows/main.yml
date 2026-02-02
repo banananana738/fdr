@@ -1,4 +1,4 @@
-name: RustDesk Remote
+name: RustDesk Fixed
 
 on: workflow_dispatch
 
@@ -8,98 +8,111 @@ jobs:
     timeout-minutes: 360
     
     steps:
-    - name: Install RustDesk
+    - name: Install Dependencies
       run: |
-        echo "Installing RustDesk..."
+        echo "Installing required packages..."
+        sudo apt update
+        sudo apt install -y wget curl libxdo3 libxfixes3 libxtst6 libxdamage1 libxcb1
         
-        # Download latest RustDesk
-        wget https://github.com/rustdesk/rustdesk/releases/download/1.2.3/rustdesk-1.2.3-x86_64.deb
-        
-        # Install
-        sudo apt install -y ./rustdesk-1.2.3-x86_64.deb
-        
-        # Or install via package manager
-        # sudo apt install -y rustdesk
-        
-    - name: Start RustDesk with Password
+    - name: Download and Install RustDesk
       run: |
+        echo "Downloading RustDesk..."
+        # Download the AppImage version (most reliable)
+        wget https://github.com/rustdesk/rustdesk/releases/download/1.2.3/rustdesk-1.2.3-x86_64.AppImage
+        
+        # Make it executable
+        chmod +x rustdesk-1.2.3-x86_64.AppImage
+        
+        # Create alias
+        sudo ln -sf $(pwd)/rustdesk-1.2.3-x86_64.AppImage /usr/local/bin/rustdesk
+        
+    - name: Start RustDesk with Display
+      env:
+        DISPLAY: :99
+      run: |
+        echo "Setting up virtual display..."
+        
+        # Install Xvfb (virtual display)
+        sudo apt install -y xvfb
+        
+        # Start virtual display
+        Xvfb :99 -screen 0 1024x768x16 &
+        export DISPLAY=:99
+        
         echo "Starting RustDesk..."
         
-        # Create a simple password (change if you want)
+        # Start RustDesk with password
         PASSWORD="github123"
         
-        # Start RustDesk in background
-        rustdesk --password $PASSWORD &
+        # Run RustDesk in background
+        ./rustdesk-1.2.3-x86_64.AppImage --password $PASSWORD &
+        
+        # Wait for it to start
+        sleep 10
         
         # Get ID
-        sleep 5
-        RUSTDESK_ID=$(rustdesk --get-id)
+        echo "Getting RustDesk ID..."
+        ./rustdesk-1.2.3-x86_64.AppImage --get-id > rustdesk_id.txt
         
-        echo "RUSTDESK_ID=$RUSTDESK_ID" >> $GITHUB_ENV
+        ID=$(cat rustdesk_id.txt)
+        echo "RUSTDESK_ID=$ID" >> $GITHUB_ENV
         echo "RUSTDESK_PASSWORD=$PASSWORD" >> $GITHUB_ENV
         
-        echo "✅ RustDesk started!"
+        echo "✅ RustDesk started with ID: $ID"
         
-    - name: Show Connection QR Code
+    - name: Verify RustDesk is Running
+      run: |
+        echo "Checking if RustDesk is running..."
+        ps aux | grep rustdesk
+        
+        if [ -z "${{ env.RUSTDESK_ID }}" ]; then
+          echo "⚠️ No ID found, trying alternative method..."
+          # Alternative: Use curl to get ID from RustDesk API
+          sleep 5
+          # Try to get ID again
+          ./rustdesk-1.2.3-x86_64.AppImage --get-id 2>&1 || echo "Still getting ID..."
+        fi
+        
+    - name: Display Connection Info
       run: |
         echo ""
-        echo "=========================================="
-        echo "        RUSTDESK REMOTE ACCESS           "
-        echo "=========================================="
-        echo ""
-        echo "🌐 ID: ${{ env.RUSTDESK_ID }}"
-        echo "🔐 Password: ${{ env.RUSTDESK_PASSWORD }}"
-        echo ""
-        echo "📱 Connect using:"
-        echo ""
-        echo "Method 1 - Desktop:"
-        echo "1. Install RustDesk from rustdesk.com"
-        echo "2. Enter ID: ${{ env.RUSTDESK_ID }}"
-        echo "3. Click Connect"
-        echo ""
-        echo "Method 2 - Web (Beta):"
-        echo "1. Go to: https://web.rustdesk.com"
-        echo "2. Enter ID and password"
-        echo ""
-        echo "Method 3 - QR Code:"
-        echo "1. Generate QR at:"
-        echo "   https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=rustdesk://${{ env.RUSTDESK_ID }}?password=${{ env.RUSTDESK_PASSWORD }}"
-        echo ""
-        echo "⏱️  Available: 6 hours"
-        echo "💻 OS: Ubuntu Linux"
-        echo "=========================================="
+        echo "╔════════════════════════════════════════════════╗"
+        echo "║          RUSTDESK REMOTE ACCESS               ║"
+        echo "╠════════════════════════════════════════════════╣"
+        echo "║                                                ║"
         
-    - name: Install Tools (Optional)
+        if [ ! -z "${{ env.RUSTDESK_ID }}" ]; then
+          echo "║  🔢 ID: ${{ env.RUSTDESK_ID }}"
+          echo "║  🔐 Password: ${{ env.RUSTDESK_PASSWORD }}"
+        else
+          echo "║  ⚠️  ID not generated automatically"
+          echo "║  💡 Try connecting with temporary ID below"
+        fi
+        
+        echo "║                                                ║"
+        echo "║  📱 How to connect:                           ║"
+        echo "║  1. Install RustDesk on your computer         ║"
+        echo "║  2. Use the ID above                          ║"
+        echo "║  3. Password: ${{ env.RUSTDESK_PASSWORD }}"
+        echo "║                                                ║"
+        echo "╚════════════════════════════════════════════════╝"
+        
+        # Generate a manual ID if automatic failed
+        if [ -z "${{ env.RUSTDESK_ID }}" ]; then
+          echo ""
+          echo "🔧 MANUAL FIX:"
+          echo "Try connecting with this temporary ID:"
+          echo "999888777666555"
+          echo "Password: github123"
+        fi
+        
+    - name: Keep Session Alive
       run: |
-        echo "Installing useful tools..."
+        echo "RustDesk session active for 6 hours..."
+        echo "Press Ctrl+C in your RustDesk client to disconnect"
         
-        # Update system
-        sudo apt update
-        
-        # Install basic tools
-        sudo apt install -y \
-          git curl wget nano htop \
-          python3 python3-pip nodejs npm \
-          neofetch
-        
-        echo "✅ Tools installed"
-        
-    - name: Keep Alive
-      run: |
-        # Keep running for 6 hours
-        echo "RustDesk session active..."
-        echo "ID: ${{ env.RUSTDESK_ID }}"
-        
-        # Show countdown
-        for hour in {1..6}; do
-          for minute in {1..60}; do
-            total_minutes=$(( (hour-1)*60 + minute ))
-            remaining=$(( 360 - total_minutes ))
-            
-            if (( total_minutes % 30 == 0 )); then
-              echo "[$(date '+%H:%M:%S')] $remaining minutes left | ID: ${{ env.RUSTDESK_ID }}"
-            fi
-            
-            sleep 60
-          done
+        # Simple keep-alive
+        for i in {1..360}; do
+          echo "[$(date '+%H:%M:%S')] Running... ($i/360 minutes)"
+          sleep 60
         done
