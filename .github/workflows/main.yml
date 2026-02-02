@@ -1,272 +1,318 @@
-name: programmingwithkumaresan-rdp-fixed
+name: Remote Desktop Access
 
 on:
   workflow_dispatch:
     inputs:
-      rdp_password:
-        description: 'RDP Password'
+      password:
+        description: 'RDP Password (min 6 chars)'
         required: true
-        default: 'GitHubRDP2024'
+        default: 'Pass123!'
         type: string
 
+env:
+  NGROK_TOKEN: "2yTGXjOucmtLbslj4gHvfhPMMtD_7WvugEqip6Y3Utun6Em4n"
+
 jobs:
-  rdp-access:
+  remote-desktop:
     runs-on: windows-latest
-    timeout-minutes: 355
+    timeout-minutes: 340
     
     steps:
-      - name: Enable Windows RDP
-        run: |
-          echo "=== Enabling Remote Desktop ==="
-          
-          # 1. Enable RDP in registry
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
-          
-          # 2. Allow through firewall
-          netsh advfirewall firewall add rule name="RDP Port 3389" dir=in action=allow protocol=TCP localport=3389
-          
-          # 3. Disable NLA for easier connection
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
-          
-          echo "RDP configuration complete"
-          
-      - name: Create Windows User
-        env:
-          WIN_PASS: ${{ github.event.inputs.rdp_password }}
-        run: |
-          echo "=== Creating RDP User ==="
-          
-          # Create user with NET command (most reliable)
-          net user githubrunner "$env:WIN_PASS" /add /y
-          net localgroup "Remote Desktop Users" githubrunner /add
-          net localgroup administrators githubrunner /add
-          
-          echo "User 'githubrunner' created successfully"
-          echo "USERNAME=githubrunner" >> $env:GITHUB_ENV
-          
-      - name: Setup Ngrok with YOUR Token
-        run: |
-          echo "=== Setting up Ngrok ==="
-          
-          # Download ngrok (using working URL)
-          $ProgressPreference = 'SilentlyContinue'
-          Write-Host "Downloading ngrok..."
-          
-          # Try multiple download sources
-          try {
-              Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-windows-amd64.zip" -OutFile "ngrok.zip"
-          } catch {
-              Write-Host "Trying alternative download..."
-              Invoke-WebRequest -Uri "https://github.com/ngrok/ngrok/releases/download/v3.5.0/ngrok-v3.5.0-windows-amd64.zip" -OutFile "ngrok.zip"
-          }
-          
-          # Extract
-          if (Test-Path "ngrok.zip") {
-              Expand-Archive -Path "ngrok.zip" -DestinationPath "." -Force
-              Write-Host "Ngrok extracted successfully"
-          } else {
-              Write-Host "ERROR: Failed to download ngrok"
-              exit 1
-          }
-          
-          # Setup with YOUR token
-          Write-Host "Configuring ngrok with your token..."
-          
-          # YOUR NGROK TOKEN HERE - Replace with yours
-          $NGROK_TOKEN = "2yTGXjOucmtLbslj4gHvfhPMMtD_7WvugEqip6Y3Utun6Em4n"
-          
-          # Authenticate
-          .\ngrok.exe authtoken $NGROK_TOKEN
-          
-          if ($LASTEXITCODE -eq 0) {
-              Write-Host "✅ Ngrok authentication successful!"
-          } else {
-              Write-Host "❌ Ngrok authentication failed"
-              Write-Host "Check your token or get a new one from ngrok.com"
-              exit 1
-          }
-          
-      - name: Start RDP Tunnel
-        run: |
-          echo "=== Starting RDP Tunnel ==="
-          
-          # Start ngrok for RDP
-          Write-Host "Starting ngrok tunnel on port 3389..."
-          
-          # Start ngrok in background
-          $ngrokProcess = Start-Process -FilePath ".\ngrok.exe" -ArgumentList "tcp 3389" -PassThru -NoNewWindow
-          
-          # Save process ID
-          echo "NGROK_PID=$($ngrokProcess.Id)" >> $env:GITHUB_ENV
-          
-          # Wait for tunnel to establish
-          Write-Host "Waiting for tunnel to establish..."
-          Start-Sleep -Seconds 15
-          
-          # Get tunnel information
-          Write-Host "Getting tunnel details..."
-          
-          $maxAttempts = 10
-          for ($i = 1; $i -le $maxAttempts; $i++) {
-              try {
-                  $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 5
-                  
-                  if ($response.tunnels -and $response.tunnels.Count -gt 0) {
-                      $tunnel = $response.tunnels[0]
-                      $publicUrl = $tunnel.public_url
-                      
-                      # Remove tcp:// prefix
-                      $publicUrl = $publicUrl -replace 'tcp://', ''
-                      
-                      echo "RDP_URL=$publicUrl" >> $env:GITHUB_ENV
-                      Write-Host "✅ Tunnel established: $publicUrl"
-                      break
-                  }
-              } catch {
-                  Write-Host "Attempt $i/$maxAttempts: Waiting for tunnel..."
-                  Start-Sleep -Seconds 5
-              }
-          }
-          
-          if ([string]::IsNullOrEmpty($env:RDP_URL)) {
-              Write-Host "⚠️ Could not get tunnel URL from API"
-              Write-Host "Check ngrok output above for manual URL"
-          }
-          
-      - name: Display Connection Instructions
-        run: |
-          echo ""
-          echo "╔══════════════════════════════════════════════════════╗"
-          echo "║          🖥️  REMOTE DESKTOP CONNECTION READY         ║"
-          echo "╚══════════════════════════════════════════════════════╝"
-          echo ""
-          
-          if (-not [string]::IsNullOrEmpty($env:RDP_URL)) {
-              $urlParts = $env:RDP_URL -split ':'
-              $hostname = $urlParts[0]
-              $port = $urlParts[1]
-              
-              echo "🌐 CONNECTION DETAILS:"
-              echo "   Host: $hostname"
-              echo "   Port: $port"
-              echo "   👤 Username: $env:USERNAME"
-              echo "   🔐 Password: ${{ github.event.inputs.rdp_password }}"
-              echo ""
-              echo "📱 HOW TO CONNECT:"
-              echo ""
-              echo "1. On Windows:"
-              echo "   Press Win + R, type 'mstsc', press Enter"
-              echo "   Computer: $hostname`:$port"
-              echo ""
-              echo "2. Command line:"
-              echo "   mstsc /v:$hostname`:$port"
-              echo ""
-              echo "3. Save as RDP file:"
-              echo "   full address:s:$hostname`:$port"
-              echo "   username:s:$env:USERNAME"
-              echo ""
-              echo "4. On Mac/Linux:"
-              echo "   Use Microsoft Remote Desktop app"
-              echo "   PC name: $hostname`:$port"
-              echo ""
-              
-              # Generate quick connect command
-              echo "⚡ QUICK CONNECT:"
-              echo "   mstsc /v:$env:RDP_URL"
-              
-          } else {
-              echo "⚠️  Tunnel URL not available"
-              echo "Check the 'Start RDP Tunnel' step above for ngrok output"
-          }
-          
-          echo ""
-          echo "⏰ SESSION DURATION: 6 hours"
-          echo "📅 Started at: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-          echo ""
-          
-      - name: Monitor Session
-        run: |
-          # Keep session alive for 5.5 hours
-          $endTime = (Get-Date).AddMinutes(330)
-          
-          while ((Get-Date) -lt $endTime) {
-              $timeLeft = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 0)
-              $percent = [math]::Round((330 - $timeLeft) / 330 * 100, 0)
-              
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Session active - $timeLeft minutes left"
-              
-              # Show connection info every 10 minutes
-              if ($timeLeft % 10 -eq 0 -and -not [string]::IsNullOrEmpty($env:RDP_URL)) {
-                  Write-Host "   🔗 Connect via: $env:RDP_URL"
-                  Write-Host "   👤 Username: $env:USERNAME"
-              }
-              
-              Start-Sleep -Seconds 60
-          }
-          
-          Write-Host "⏰ Session time ending in 30 minutes..."
-          
-      - name: Run Your Custom Scripts
-        run: |
-          echo "=== Running Your Scripts ==="
-          
-          # If you have Downloads.bat, run it
-          if (Test-Path "Downloads.bat") {
-              echo "Running Downloads.bat..."
-              cmd /c "Downloads.bat"
-          } else {
-              echo "No Downloads.bat found, creating example..."
-              
-              # Create example script
-              @"
-@echo off
-echo ========================================
-echo   GitHub Actions RDP Session
-echo ========================================
-echo Date: %date%
-echo Time: %time%
-echo Username: %username%
-echo Computer: %computername%
-echo ========================================
-echo.
-echo Installing example tools...
-echo.
-
-REM Example installations (commented out)
-REM choco install -y git python nodejs
-
-echo.
-echo RDP Session Active via Ngrok
-echo ========================================
+    # STEP 1: Basic setup
+    - name: Setup Windows
+      run: |
+        echo "=== Step 1: Basic Setup ==="
+        echo "Current directory: $pwd"
+        echo "Running as: $(whoami)"
+        
+    # STEP 2: Enable RDP (SIMPLE VERSION)
+    - name: Enable RDP
+      run: |
+        echo "=== Step 2: Enabling RDP ==="
+        
+        # Method 1: Use PowerShell to enable RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        
+        # Method 2: Also use reg command
+        reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
+        
+        echo "RDP Registry updated"
+        
+        # Open firewall (ALL methods)
+        netsh advfirewall firewall add rule name="Open RDP Port 3389" dir=in action=allow protocol=TCP localport=3389
+        
+        # Also try PowerShell method
+        Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+        
+        echo "Firewall configured"
+        
+    # STEP 3: Create user
+    - name: Create User
+      env:
+        RDP_PASS: ${{ github.event.inputs.password }}
+      run: |
+        echo "=== Step 3: Creating User ==="
+        
+        # Store password securely
+        $securePass = ConvertTo-SecureString "$env:RDP_PASS" -AsPlainText -Force
+        
+        # Try multiple methods
+        try {
+            # Method 1: PowerShell
+            New-LocalUser -Name "rdpuser" -Password $securePass -FullName "RDP User" -Description "GitHub Runner"
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser"
+            Add-LocalGroupMember -Group "Administrators" -Member "rdpuser"
+            echo "User created with PowerShell"
+        } catch {
+            echo "PowerShell method failed, trying NET command..."
+            # Method 2: NET command (more reliable)
+            net user rdpuser "$env:RDP_PASS" /add /y
+            net localgroup "Remote Desktop Users" rdpuser /add
+            net localgroup administrators rdpuser /add
+            echo "User created with NET command"
+        }
+        
+        echo "USERNAME=rdpuser" >> $env:GITHUB_ENV
+        echo "User 'rdpuser' created successfully"
+        
+    # STEP 4: Download Ngrok (FIXED VERSION)
+    - name: Get Ngrok
+      run: |
+        echo "=== Step 4: Downloading Ngrok ==="
+        
+        # Create directory
+        New-Item -ItemType Directory -Path "ngrok" -Force
+        
+        # Download ngrok using GitHub's cache-friendly URL
+        $downloadUrl = "https://github.com/ngrok/ngrok/releases/download/v3.5.0/ngrok-v3.5.0-windows-amd64.zip"
+        
+        echo "Downloading from: $downloadUrl"
+        
+        # Use different download methods
+        try {
+            # Method 1: Invoke-WebRequest
+            Invoke-WebRequest -Uri $downloadUrl -OutFile "ngrok.zip" -UserAgent "GitHubActions"
+            echo "Downloaded via Invoke-WebRequest"
+        } catch {
+            echo "Method 1 failed, trying curl..."
+            # Method 2: curl
+            curl -L $downloadUrl -o ngrok.zip
+            echo "Downloaded via curl"
+        }
+        
+        # Verify download
+        if (Test-Path "ngrok.zip") {
+            $size = (Get-Item "ngrok.zip").Length / 1MB
+            echo "Download successful: $size MB"
+            
+            # Extract
+            Expand-Archive -Path "ngrok.zip" -DestinationPath "ngrok" -Force
+            
+            # Verify extraction
+            if (Test-Path "ngrok/ngrok.exe") {
+                echo "✅ Ngrok extracted successfully"
+            } else {
+                # Try alternative extraction
+                echo "Looking for ngrok.exe..."
+                Get-ChildItem -Path "ngrok" -Recurse | Where-Object { $_.Name -like "*ngrok*" } | Select-Object Name
+            }
+        } else {
+            echo "❌ Download failed"
+            # List what we have
+            Get-ChildItem
+        }
+        
+    # STEP 5: Setup Ngrok with token
+    - name: Configure Ngrok
+      run: |
+        echo "=== Step 5: Configuring Ngrok ==="
+        
+        # Set location
+        Set-Location -Path "ngrok"
+        
+        # Check if ngrok exists
+        if (Test-Path "ngrok.exe") {
+            echo "Ngrok.exe found"
+        } else {
+            # Try to find it
+            $ngrokExe = Get-ChildItem -Path "." -Filter "*ngrok*.exe" -Recurse | Select-Object -First 1
+            if ($ngrokExe) {
+                echo "Found: $($ngrokExe.FullName)"
+                Copy-Item -Path $ngrokExe.FullName -Destination "ngrok.exe" -Force
+            }
+        }
+        
+        # Setup auth token
+        echo "Setting up Ngrok token..."
+        
+        # YOUR TOKEN HERE
+        $token = "2yTGXjOucmtLbslj4gHvfhPMMtD_7WvugEqip6Y3Utun6Em4n"
+        
+        # Authenticate
+        .\ngrok.exe authtoken $token
+        
+        if ($LASTEXITCODE -eq 0) {
+            echo "✅ Ngrok authentication successful"
+        } else {
+            echo "❌ Ngrok auth failed"
+            echo "Testing token validity..."
+            
+            # Test token format
+            if ($token.Length -lt 20) {
+                echo "Token seems too short"
+            }
+            
+            # Get new token from: https://dashboard.ngrok.com/get-started/your-authtoken
+            echo "Get new token from: https://dashboard.ngrok.com"
+        }
+        
+    # STEP 6: Start Ngrok tunnel
+    - name: Start Tunnel
+      run: |
+        echo "=== Step 6: Starting Tunnel ==="
+        
+        # Start ngrok for RDP
+        echo "Starting ngrok on port 3389..."
+        
+        # Method: Start as background job
+        Start-Job -Name "NgrokTunnel" -ScriptBlock {
+            Set-Location "$using:PWD\ngrok"
+            .\ngrok.exe tcp 3389 --log stdout
+        }
+        
+        # Wait a bit
+        Start-Sleep -Seconds 10
+        
+        # Check if ngrok is running
+        $process = Get-Process -Name "ngrok" -ErrorAction SilentlyContinue
+        if ($process) {
+            echo "✅ Ngrok process running (PID: $($process.Id))"
+        } else {
+            echo "⚠️ Ngrok process not found, checking jobs..."
+            Get-Job | Format-List
+        }
+        
+        # Try to get tunnel info (retry multiple times)
+        $tunnelUrl = $null
+        for ($i = 1; $i -le 10; $i++) {
+            try {
+                echo "Attempt $i to get tunnel info..."
+                $response = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels" -TimeoutSec 3
+                
+                if ($response.tunnels -and $response.tunnels.Count -gt 0) {
+                    $tunnelUrl = $response.tunnels[0].public_url
+                    $tunnelUrl = $tunnelUrl -replace 'tcp://', ''
+                    echo "✅ Tunnel URL: $tunnelUrl"
+                    break
+                }
+            } catch {
+                echo "API not ready yet..."
+            }
+            Start-Sleep -Seconds 3
+        }
+        
+        if ($tunnelUrl) {
+            echo "RDP_URL=$tunnelUrl" >> $env:GITHUB_ENV
+        else {
+            echo "⚠️ Could not get tunnel URL automatically"
+            echo "Check ngrok output above for manual URL"
+        }
+        
+    # STEP 7: Display connection info
+    - name: Show Connection Details
+      run: |
+        echo ""
+        echo "############################################"
+        echo "#        REMOTE DESKTOP READY              #"
+        echo "############################################"
+        echo ""
+        
+        if ($env:RDP_URL) {
+            $parts = $env:RDP_URL -split ':'
+            echo "🌐 ADDRESS: $($parts[0])"
+            echo "🚪 PORT: $($parts[1])"
+        } else {
+            echo "🌐 ADDRESS: 0.tcp.ngrok.io"
+            echo "🚪 PORT: (check ngrok output above)"
+        }
+        
+        echo "👤 USERNAME: $env:USERNAME"
+        echo "🔐 PASSWORD: ${{ github.event.inputs.password }}"
+        echo ""
+        echo "📱 HOW TO CONNECT:"
+        echo "1. Open Remote Desktop (mstsc.exe)"
+        echo "2. Enter: address:port"
+        echo "3. Username: $env:USERNAME"
+        echo "4. Password: ${{ github.event.inputs.password }}"
+        echo ""
+        echo "⏰ AVAILABLE FOR: 5.5 hours"
+        echo "############################################"
+        
+    # STEP 8: Keep alive
+    - name: Wait and Keep Alive
+      run: |
+        echo "=== Keeping session active ==="
+        
+        # Show timer
+        $endTime = (Get-Date).AddMinutes(330)  # 5.5 hours
+        
+        while ((Get-Date) -lt $endTime) {
+            $minutesLeft = [math]::Round(($endTime - (Get-Date)).TotalMinutes, 0)
+            
+            # Clear line and show progress
+            Write-Host "`r[$(Get-Date -Format 'HH:mm:ss')] RDP Active - $minutesLeft minutes left   " -NoNewline
+            
+            # Show connection info every 5 minutes
+            if ($minutesLeft % 5 -eq 0) {
+                Write-Host ""
+                Write-Host "   Connect using: $env:RDP_URL"
+                Write-Host "   Username: $env:USERNAME"
+            }
+            
+            Start-Sleep -Seconds 60
+        }
+        
+        Write-Host ""
+        Write-Host "⏰ Session ending in 10 minutes..."
+        
+    # STEP 9: Run your scripts
+    - name: Run Custom Scripts
+      run: |
+        echo "=== Running your scripts ==="
+        
+        # Check for your Downloads.bat
+        if (Test-Path "../Downloads.bat") {
+            echo "Found Downloads.bat, running..."
+            Set-Location ..
+            cmd /c "Downloads.bat"
+        } else {
+            echo "No Downloads.bat found"
+            echo "Creating test environment..."
+            
+            # Create test files
+            @"
+echo RDP Session Active
+echo Connected via GitHub Actions + Ngrok
+echo Username: %USERNAME%
+echo Date: %DATE%
+echo Time: %TIME%
 pause
-"@ | Out-File -FilePath "Downloads.bat" -Encoding ASCII
-              
-              cmd /c "Downloads.bat"
-          }
-          
-      - name: Cleanup
-        if: always()
-        run: |
-          echo "=== Cleaning Up ==="
-          
-          # Kill ngrok
-          if (-not [string]::IsNullOrEmpty($env:NGROK_PID)) {
-              Write-Host "Stopping ngrok (PID: $env:NGROK_PID)..."
-              Stop-Process -Id $env:NGROK_PID -Force -ErrorAction SilentlyContinue
-          }
-          
-          # Kill all ngrok processes
-          Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
-          
-          # Delete user
-          Write-Host "Removing user..."
-          net user $env:USERNAME /delete /y 2>$null
-          
-          # Disable RDP
-          Write-Host "Disabling RDP..."
-          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 1 /f
-          
-          # Remove firewall rule
-          netsh advfirewall firewall delete rule name="RDP Port 3389" 2>$null
-          
-          Write-Host "✅ Cleanup complete!"
+"@ | Out-File -FilePath "test.bat" -Encoding ASCII
+            
+            cmd /c "test.bat"
+        }
+        
+    # STEP 10: Cleanup
+    - name: Cleanup
+      if: always()
+      run: |
+        echo "=== Cleaning up ==="
+        
+        # Stop ngrok
+        Stop-Job -Name "NgrokTunnel" -ErrorAction SilentlyContinue
+        Get-Process -Name "ngrok" -ErrorAction SilentlyContinue | Stop-Process -Force
+        
+        # Remove user
+        net user $env:USERNAME /delete /y 2>$null
+        
+        echo "✅ Cleanup complete"
